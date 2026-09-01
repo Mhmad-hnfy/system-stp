@@ -23,7 +23,11 @@ export async function POST(req) {
 
     if (error) {
       console.error("Supabase login query error:", error);
-      return NextResponse.json({ success: false, message: "خطأ في الاتصال بقاعدة البيانات" }, { status: 500 });
+      return NextResponse.json({ 
+        success: false, 
+        message: `خطأ في الاتصال بقاعدة البيانات (${error.message || "يرجى التأكد من تشغيل سكريبت الجداول في Supabase"})`,
+        error_details: error 
+      }, { status: 500 });
     }
 
     if (!user) {
