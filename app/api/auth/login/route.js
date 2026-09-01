@@ -1,18 +1,28 @@
 import { NextResponse } from "next/server";
-import db from "@/lib/db";
+import { supabase } from "@/lib/supabase";
 import bcrypt from "bcryptjs";
 import { signCookieValue } from "@/lib/auth";
 
 export async function POST(req) {
   try {
     const { phone, password } = await req.json();
-    if (!phone || !password)
+    if (!phone || !password) {
       return NextResponse.json({ success: false, message: "أدخل رقم الهاتف وكلمة السر" }, { status: 400 });
+    }
 
     const cleanPhone = phone.trim();
 
-    // Query user by phone via SQLite
-    const user = db.prepare("SELECT * FROM users WHERE phone = ?").get(cleanPhone);
+    // Query user by phone via Supabase
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("phone", cleanPhone)
+      .maybeSingle();
+
+    if (error) {
+      console.error("Supabase login query error:", error);
+      return NextResponse.json({ success: false, message: "خطأ في الاتصال بقاعدة البيانات" }, { status: 500 });
+    }
 
     if (!user) {
       return NextResponse.json({ success: false, message: "رقم الهاتف غير مسجل" }, { status: 401 });
@@ -20,14 +30,15 @@ export async function POST(req) {
 
     // Check password (support both bcrypt hash and plaintext fallback)
     let match = false;
-    if (user.password.startsWith("$2a$") || user.password.startsWith("$2b$")) {
+    if (user.password && (user.password.startsWith("$2a$") || user.password.startsWith("$2b$"))) {
       match = await bcrypt.compare(password, user.password);
     } else {
       match = user.password === password;
     }
 
-    if (!match)
+    if (!match) {
       return NextResponse.json({ success: false, message: "كلمة السر غير صحيحة" }, { status: 401 });
+    }
 
     // Remove sensitive password from response
     const { password: _, ...safeUser } = user;

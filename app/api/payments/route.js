@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import db from "@/lib/db";
+import { supabase } from "@/lib/supabase";
 import { v4 as uuidv4 } from "uuid";
 
 // GET — جلب وصولات الدفع
@@ -10,68 +10,72 @@ export async function GET(req) {
     const status = searchParams.get("status");
     const month = searchParams.get("month");
 
-    let sql = `
-      SELECT 
-        p.id, 
-        p.month, 
-        p.image_url, 
-        p.status, 
-        p.notes, 
-        p.created_at, 
-        p.confirmed_at,
-        u.id as student_id,
-        u.name as student_name,
-        u.phone as student_phone,
-        u.group_name as student_group_name,
-        c.id as confirmer_id,
-        c.name as confirmer_name
-      FROM payment_receipts p
-      JOIN users u ON p.student_id = u.id
-      LEFT JOIN users c ON p.confirmed_by = c.id
-      WHERE 1=1
-    `;
-    const params = [];
+    let query = supabase
+      .from("payment_receipts")
+      .select("id, month, image_url, status, notes, created_at, confirmed_at, student_id, confirmed_by")
+      .order("created_at", { ascending: false });
 
-    if (student_id) {
-      sql += " AND p.student_id = ?";
-      params.push(student_id);
-    }
-    if (status) {
-      sql += " AND p.status = ?";
-      params.push(status);
-    }
-    if (month) {
-      sql += " AND p.month = ?";
-      params.push(month);
+    if (student_id) query = query.eq("student_id", student_id);
+    if (status) query = query.eq("status", status);
+    if (month) query = query.eq("month", month);
+
+    const { data: rows, error } = await query;
+
+    if (error) {
+      console.error("Supabase payments GET error:", error);
+      return NextResponse.json({ success: false, message: "خطأ في جلب البيانات" }, { status: 500 });
     }
 
-    sql += " ORDER BY p.created_at DESC";
+    const userIds = new Set();
+    (rows || []).forEach((r) => {
+      if (r.student_id) userIds.add(r.student_id);
+      if (r.confirmed_by) userIds.add(r.confirmed_by);
+    });
 
-    const rows = db.prepare(sql).all(...params);
+    let usersMap = {};
+    if (userIds.size > 0) {
+      const { data: usersList } = await supabase
+        .from("users")
+        .select("id, name, phone, group_name")
+        .in("id", Array.from(userIds));
 
-    const receipts = rows.map((r) => ({
-      id: r.id,
-      month: r.month,
-      image_url: r.image_url,
-      status: r.status,
-      notes: r.notes,
-      created_at: r.created_at,
-      confirmed_at: r.confirmed_at,
-      student: {
-        id: r.student_id,
-        name: r.student_name,
-        phone: r.student_phone,
-        group_name: r.student_group_name,
-      },
-      confirmer: r.confirmer_id ? {
-        id: r.confirmer_id,
-        name: r.confirmer_name,
-      } : null,
-    }));
+      (usersList || []).forEach((u) => {
+        usersMap[u.id] = u;
+      });
+    }
+
+    const receipts = (rows || []).map((r) => {
+      const student = usersMap[r.student_id];
+      const confirmer = r.confirmed_by ? usersMap[r.confirmed_by] : null;
+
+      return {
+        id: r.id,
+        month: r.month,
+        image_url: r.image_url,
+        status: r.status,
+        notes: r.notes,
+        created_at: r.created_at,
+        confirmed_at: r.confirmed_at,
+        student: student
+          ? {
+              id: student.id,
+              name: student.name,
+              phone: student.phone,
+              group_name: student.group_name,
+            }
+          : { id: r.student_id, name: "طالب غير معروف", phone: "", group_name: "" },
+        confirmer: confirmer
+          ? {
+              id: confirmer.id,
+              name: confirmer.name,
+            }
+          : null,
+      };
+    });
 
     return NextResponse.json({ success: true, receipts });
   } catch (e) {
-    console.error("Payments GET error:", e);
+    console.error("Payments GET catch error:", e);
     return NextResponse.json({ success: false, message: "خطأ في جلب البيانات" }, { status: 500 });
   }
 }
@@ -81,31 +85,63 @@ export async function POST(req) {
   try {
     const body = await req.json();
     const { student_id, month, image_url } = body;
-    if (!student_id || !month || !image_url)
+    if (!student_id || !month || !image_url) {
       return NextResponse.json({ success: false, message: "بيانات ناقصة" }, { status: 400 });
-
-    const existing = db.prepare("SELECT id FROM payment_receipts WHERE student_id = ? AND month = ?").get(student_id, month);
-
-    let receiptId;
-    if (existing) {
-      receiptId = existing.id;
-      db.prepare(`
-        UPDATE payment_receipts 
-        SET image_url = ?, status = 'pending', notes = NULL, confirmed_by = NULL, confirmed_at = NULL 
-        WHERE id = ?
-      `).run(image_url, receiptId);
-    } else {
-      receiptId = uuidv4();
-      db.prepare(`
-        INSERT INTO payment_receipts (id, student_id, month, image_url, status)
-        VALUES (?, ?, ?, ?, 'pending')
-      `).run(receiptId, student_id, month, image_url);
     }
 
-    const receipt = db.prepare("SELECT * FROM payment_receipts WHERE id = ?").get(receiptId);
+    const { data: existing } = await supabase
+      .from("payment_receipts")
+      .select("id")
+      .eq("student_id", student_id)
+      .eq("month", month)
+      .maybeSingle();
+
+    let receipt;
+    if (existing) {
+      const { data: updated, error } = await supabase
+        .from("payment_receipts")
+        .update({
+          image_url,
+          status: "pending",
+          notes: null,
+          confirmed_by: null,
+          confirmed_at: null,
+        })
+        .eq("id", existing.id)
+        .select("*")
+        .single();
+
+      if (error) {
+        console.error("Supabase payment update error:", error);
+        return NextResponse.json({ success: false, message: "خطأ في تحديث الوصل" }, { status: 500 });
+      }
+      receipt = updated;
+    } else {
+      const receiptId = uuidv4();
+      const { data: inserted, error } = await supabase
+        .from("payment_receipts")
+        .insert([
+          {
+            id: receiptId,
+            student_id,
+            month,
+            image_url,
+            status: "pending",
+          },
+        ])
+        .select("*")
+        .single();
+
+      if (error) {
+        console.error("Supabase payment insert error:", error);
+        return NextResponse.json({ success: false, message: "خطأ في رفع الوصل" }, { status: 500 });
+      }
+      receipt = inserted;
+    }
+
     return NextResponse.json({ success: true, receipt });
   } catch (e) {
-    console.error("Payments POST error:", e);
+    console.error("Payments POST catch error:", e);
     return NextResponse.json({ success: false, message: "خطأ في رفع الوصل" }, { status: 500 });
   }
 }
@@ -114,20 +150,31 @@ export async function POST(req) {
 export async function PATCH(req) {
   try {
     const { receipt_id, admin_id, notes } = await req.json();
-    if (!receipt_id)
+    if (!receipt_id) {
       return NextResponse.json({ success: false, message: "بيانات ناقصة" }, { status: 400 });
+    }
 
     const now = new Date().toISOString();
-    db.prepare(`
-      UPDATE payment_receipts 
-      SET status = 'confirmed', confirmed_by = ?, confirmed_at = ?, notes = ?
-      WHERE id = ?
-    `).run(admin_id || null, now, notes || null, receipt_id);
+    const { data: receipt, error } = await supabase
+      .from("payment_receipts")
+      .update({
+        status: "confirmed",
+        confirmed_by: admin_id || null,
+        confirmed_at: now,
+        notes: notes || null,
+      })
+      .eq("id", receipt_id)
+      .select("*")
+      .single();
 
-    const receipt = db.prepare("SELECT * FROM payment_receipts WHERE id = ?").get(receipt_id);
+    if (error) {
+      console.error("Supabase payments PATCH error:", error);
+      return NextResponse.json({ success: false, message: "خطأ في التأكيد" }, { status: 500 });
+    }
+
     return NextResponse.json({ success: true, message: "تم تأكيد الدفع ✓", receipt });
   } catch (e) {
-    console.error("Payments PATCH error:", e);
+    console.error("Payments PATCH catch error:", e);
     return NextResponse.json({ success: false, message: "خطأ في التأكيد" }, { status: 500 });
   }
 }
@@ -138,10 +185,16 @@ export async function DELETE(req) {
     const { id } = await req.json();
     if (!id) return NextResponse.json({ success: false, message: "معرف الإيصال مطلوب" }, { status: 400 });
 
-    db.prepare("DELETE FROM payment_receipts WHERE id = ?").run(id);
+    const { error } = await supabase.from("payment_receipts").delete().eq("id", id);
+
+    if (error) {
+      console.error("Supabase payments DELETE error:", error);
+      return NextResponse.json({ success: false, message: "خطأ في حذف الإيصال" }, { status: 500 });
+    }
+
     return NextResponse.json({ success: true, message: "تم حذف الإيصال بنجاح ✓" });
   } catch (e) {
-    console.error("Payments DELETE error:", e);
+    console.error("Payments DELETE catch error:", e);
     return NextResponse.json({ success: false, message: "خطأ في حذف الإيصال" }, { status: 500 });
   }
 }

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import db from "@/lib/db";
+import { supabase } from "@/lib/supabase";
 import bcrypt from "bcryptjs";
 import { v4 as uuidv4 } from "uuid";
 
@@ -9,25 +9,25 @@ export async function GET(req) {
     const { searchParams } = new URL(req.url);
     const role = searchParams.get("role");
 
-    let users;
+    let query = supabase
+      .from("users")
+      .select("id, name, phone, role, group_id, group_name, status, created_at")
+      .order("created_at", { ascending: false });
+
     if (role) {
-      users = db.prepare(`
-        SELECT id, name, phone, role, group_id, group_name, status, created_at 
-        FROM users 
-        WHERE role = ? 
-        ORDER BY created_at DESC
-      `).all(role);
-    } else {
-      users = db.prepare(`
-        SELECT id, name, phone, role, group_id, group_name, status, created_at 
-        FROM users 
-        ORDER BY created_at DESC
-      `).all();
+      query = query.eq("role", role);
     }
 
-    return NextResponse.json({ success: true, users });
+    const { data: users, error } = await query;
+
+    if (error) {
+      console.error("Supabase users GET error:", error);
+      return NextResponse.json({ success: false, message: "خطأ في جلب البيانات" }, { status: 500 });
+    }
+
+    return NextResponse.json({ success: true, users: users || [] });
   } catch (e) {
-    console.error("Users GET error:", e);
+    console.error("Users GET catch error:", e);
     return NextResponse.json({ success: false, message: "خطأ في جلب البيانات" }, { status: 500 });
   }
 }
@@ -36,36 +36,65 @@ export async function GET(req) {
 export async function POST(req) {
   try {
     const { name, phone, password, role, group_name } = await req.json();
-    if (!name || !phone || !password)
+    if (!name || !phone || !password) {
       return NextResponse.json({ success: false, message: "أدخل جميع البيانات المطلوبة" }, { status: 400 });
+    }
 
     const cleanPhone = phone.trim();
     const cleanName = name.trim();
     const cleanRole = role || "student";
     const cleanGroup = group_name?.trim() || null;
 
-    const exists = db.prepare("SELECT id FROM users WHERE phone = ?").get(cleanPhone);
-    if (exists)
+    // Check if phone exists
+    const { data: exists } = await supabase
+      .from("users")
+      .select("id")
+      .eq("phone", cleanPhone)
+      .maybeSingle();
+
+    if (exists) {
       return NextResponse.json({ success: false, message: "رقم الهاتف مسجل بالفعل" }, { status: 409 });
+    }
 
     let groupId = null;
     if (cleanGroup) {
-      const grp = db.prepare("SELECT id FROM groups WHERE name = ?").get(cleanGroup);
+      const { data: grp } = await supabase
+        .from("groups")
+        .select("id")
+        .eq("name", cleanGroup)
+        .maybeSingle();
+
       if (grp) groupId = grp.id;
     }
 
     const hashed = await bcrypt.hash(password, 12);
     const userId = uuidv4();
 
-    db.prepare(`
-      INSERT INTO users (id, name, phone, password, role, group_id, group_name, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(userId, cleanName, cleanPhone, hashed, cleanRole, groupId, cleanGroup, "نشط");
+    const { data: user, error } = await supabase
+      .from("users")
+      .insert([
+        {
+          id: userId,
+          name: cleanName,
+          phone: cleanPhone,
+          password: hashed,
+          role: cleanRole,
+          group_id: groupId,
+          group_name: cleanGroup,
+          status: "نشط",
+        },
+      ])
+      .select("id, name, phone, role, group_id, group_name, status, created_at")
+      .single();
 
-    const user = db.prepare("SELECT id, name, phone, role, group_id, group_name, status, created_at FROM users WHERE id = ?").get(userId);
+    if (error) {
+      console.error("Supabase users POST error:", error);
+      return NextResponse.json({ success: false, message: "خطأ في إنشاء الحساب" }, { status: 500 });
+    }
+
     return NextResponse.json({ success: true, user });
   } catch (e) {
-    console.error("Users POST error:", e);
+    console.error("Users POST catch error:", e);
     return NextResponse.json({ success: false, message: "خطأ في إنشاء الحساب" }, { status: 500 });
   }
 }
@@ -76,8 +105,15 @@ export async function PUT(req) {
     const { id, name, phone, password, group_name, status } = await req.json();
     if (!id) return NextResponse.json({ success: false, message: "معرف المستخدم مطلوب" }, { status: 400 });
 
-    const existing = db.prepare("SELECT * FROM users WHERE id = ?").get(id);
-    if (!existing) return NextResponse.json({ success: false, message: "المستخدم غير موجود" }, { status: 404 });
+    const { data: existing, error: findError } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
+
+    if (findError || !existing) {
+      return NextResponse.json({ success: false, message: "المستخدم غير موجود" }, { status: 404 });
+    }
 
     const newName = name?.trim() || existing.name;
     const newPhone = phone?.trim() || existing.phone;
@@ -87,7 +123,12 @@ export async function PUT(req) {
     let groupId = existing.group_id;
     if (group_name !== undefined) {
       if (newGroup) {
-        const grp = db.prepare("SELECT id FROM groups WHERE name = ?").get(newGroup);
+        const { data: grp } = await supabase
+          .from("groups")
+          .select("id")
+          .eq("name", newGroup)
+          .maybeSingle();
+
         groupId = grp ? grp.id : null;
       } else {
         groupId = null;
@@ -99,16 +140,28 @@ export async function PUT(req) {
       newPassword = await bcrypt.hash(password.trim(), 12);
     }
 
-    db.prepare(`
-      UPDATE users 
-      SET name = ?, phone = ?, password = ?, group_id = ?, group_name = ?, status = ?
-      WHERE id = ?
-    `).run(newName, newPhone, newPassword, groupId, newGroup, newStatus, id);
+    const { data: updated, error: updateError } = await supabase
+      .from("users")
+      .update({
+        name: newName,
+        phone: newPhone,
+        password: newPassword,
+        group_id: groupId,
+        group_name: newGroup,
+        status: newStatus,
+      })
+      .eq("id", id)
+      .select("id, name, phone, role, group_id, group_name, status, created_at")
+      .single();
 
-    const updated = db.prepare("SELECT id, name, phone, role, group_id, group_name, status, created_at FROM users WHERE id = ?").get(id);
+    if (updateError) {
+      console.error("Supabase users PUT error:", updateError);
+      return NextResponse.json({ success: false, message: "خطأ في تحديث البيانات" }, { status: 500 });
+    }
+
     return NextResponse.json({ success: true, user: updated, message: "تم تحديث البيانات بنجاح ✓" });
   } catch (e) {
-    console.error("Users PUT error:", e);
+    console.error("Users PUT catch error:", e);
     return NextResponse.json({ success: false, message: "خطأ في تحديث البيانات" }, { status: 500 });
   }
 }
@@ -119,27 +172,26 @@ export async function DELETE(req) {
     const { id } = await req.json();
     if (!id) return NextResponse.json({ success: false, message: "بيانات ناقصة" }, { status: 400 });
 
-    const deleteUserTx = db.transaction((userId) => {
-      // 1. Delete student attendance or clear assistant references
-      db.prepare("DELETE FROM attendance WHERE student_id = ?").run(userId);
-      db.prepare("UPDATE attendance SET assistant_id = NULL WHERE assistant_id = ?").run(userId);
+    // 1. Clear assistant references in attendance & confirmed_by in payments & schedule created_by
+    await supabase.from("attendance").update({ assistant_id: null }).eq("assistant_id", id);
+    await supabase.from("payment_receipts").update({ confirmed_by: null }).eq("confirmed_by", id);
+    await supabase.from("groups_schedule").update({ created_by: null }).eq("created_by", id);
 
-      // 2. Delete student payment receipts or clear admin confirmer references
-      db.prepare("DELETE FROM payment_receipts WHERE student_id = ?").run(userId);
-      db.prepare("UPDATE payment_receipts SET confirmed_by = NULL WHERE confirmed_by = ?").run(userId);
+    // 2. Delete attendance & payment receipts for student
+    await supabase.from("attendance").delete().eq("student_id", id);
+    await supabase.from("payment_receipts").delete().eq("student_id", id);
 
-      // 3. Clear schedule creator references
-      db.prepare("UPDATE groups_schedule SET created_by = NULL WHERE created_by = ?").run(userId);
+    // 3. Delete user
+    const { error } = await supabase.from("users").delete().eq("id", id);
 
-      // 4. Delete user
-      db.prepare("DELETE FROM users WHERE id = ?").run(userId);
-    });
-
-    deleteUserTx(id);
+    if (error) {
+      console.error("Supabase users DELETE error:", error);
+      return NextResponse.json({ success: false, message: "خطأ في حذف المستخدم" }, { status: 500 });
+    }
 
     return NextResponse.json({ success: true, message: "تم حذف الحساب وجميع متعلقاته بنجاح ✓" });
   } catch (e) {
-    console.error("Users DELETE error:", e);
+    console.error("Users DELETE catch error:", e);
     return NextResponse.json({ success: false, message: e.message || "خطأ في الحذف" }, { status: 500 });
   }
 }

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import db from "@/lib/db";
+import { supabase } from "@/lib/supabase";
 
 // GET — قائمة الحضور مع فلترة اختيارية
 // ?student_id=xxx  → حضور طالب معين
@@ -14,68 +14,91 @@ export async function GET(req) {
     const month = searchParams.get("month");
     const group_name = searchParams.get("group_name");
 
-    let sql = `
-      SELECT 
-        a.id, 
-        a.date, 
-        a.created_at,
-        u.id as student_id,
-        u.name as student_name,
-        u.phone as student_phone,
-        u.group_name as student_group_name,
-        ast.id as assistant_id,
-        ast.name as assistant_name
-      FROM attendance a
-      JOIN users u ON a.student_id = u.id
-      LEFT JOIN users ast ON a.assistant_id = ast.id
-      WHERE 1=1
-    `;
-    const params = [];
+    let query = supabase
+      .from("attendance")
+      .select("id, date, created_at, student_id, assistant_id")
+      .order("created_at", { ascending: false });
 
     if (student_id) {
-      sql += " AND a.student_id = ?";
-      params.push(student_id);
+      query = query.eq("student_id", student_id);
     }
 
     if (date) {
-      sql += " AND a.date = ?";
-      params.push(date);
+      query = query.eq("date", date);
     }
 
     if (month) {
-      sql += " AND a.date LIKE ?";
-      params.push(`${month}%`);
+      query = query.like("date", `${month}%`);
     }
 
     if (group_name) {
-      sql += " AND u.group_name = ?";
-      params.push(group_name);
+      const { data: groupStudents } = await supabase
+        .from("users")
+        .select("id")
+        .eq("group_name", group_name);
+
+      const groupStudentIds = (groupStudents || []).map((s) => s.id);
+      if (groupStudentIds.length === 0) {
+        return NextResponse.json({ success: true, attendance: [] });
+      }
+      query = query.in("student_id", groupStudentIds);
     }
 
-    sql += " ORDER BY a.created_at DESC";
+    const { data: rows, error } = await query;
 
-    const rows = db.prepare(sql).all(...params);
+    if (error) {
+      console.error("Supabase attendance GET error:", error);
+      return NextResponse.json({ success: false, message: "خطأ في جلب الحضور" }, { status: 500 });
+    }
 
-    // Format output matching previous frontend shape
-    const attendance = rows.map((r) => ({
-      id: r.id,
-      date: r.date,
-      created_at: r.created_at,
-      student: {
-        id: r.student_id,
-        name: r.student_name,
-        phone: r.student_phone,
-        group_name: r.student_group_name,
-      },
-      assistant: r.assistant_id ? {
-        id: r.assistant_id,
-        name: r.assistant_name,
-      } : null,
-    }));
+    // Collect all related user IDs (students + assistants)
+    const userIds = new Set();
+    (rows || []).forEach((r) => {
+      if (r.student_id) userIds.add(r.student_id);
+      if (r.assistant_id) userIds.add(r.assistant_id);
+    });
+
+    let usersMap = {};
+    if (userIds.size > 0) {
+      const { data: usersList } = await supabase
+        .from("users")
+        .select("id, name, phone, group_name")
+        .in("id", Array.from(userIds));
+
+      (usersList || []).forEach((u) => {
+        usersMap[u.id] = u;
+      });
+    }
+
+    // Format output matching frontend shape
+    const attendance = (rows || []).map((r) => {
+      const student = usersMap[r.student_id];
+      const assistant = r.assistant_id ? usersMap[r.assistant_id] : null;
+
+      return {
+        id: r.id,
+        date: r.date,
+        created_at: r.created_at,
+        student: student
+          ? {
+              id: student.id,
+              name: student.name,
+              phone: student.phone,
+              group_name: student.group_name,
+            }
+          : { id: r.student_id, name: "طالب غير معروف", phone: "", group_name: "" },
+        assistant: assistant
+          ? {
+              id: assistant.id,
+              name: assistant.name,
+            }
+          : null,
+      };
+    });
 
     return NextResponse.json({ success: true, attendance });
   } catch (e) {
-    console.error("Attendance list GET error:", e);
+    console.error("Attendance list GET catch error:", e);
     return NextResponse.json({ success: false, message: "خطأ في جلب الحضور" }, { status: 500 });
   }
 }
