@@ -3,6 +3,8 @@ import { supabase } from "@/lib/supabase";
 import bcrypt from "bcryptjs";
 import { signCookieValue } from "@/lib/auth";
 
+export const dynamic = "force-dynamic";
+
 export async function POST(req) {
   try {
     const { phone, password } = await req.json();

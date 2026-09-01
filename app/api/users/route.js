@@ -3,6 +3,8 @@ import { supabase } from "@/lib/supabase";
 import bcrypt from "bcryptjs";
 import { v4 as uuidv4 } from "uuid";
 
+export const dynamic = "force-dynamic";
+
 // GET — قائمة المستخدمين
 export async function GET(req) {
   try {

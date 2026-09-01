@@ -4,6 +4,8 @@ import bcrypt from "bcryptjs";
 import { signCookieValue } from "@/lib/auth";
 import { v4 as uuidv4 } from "uuid";
 
+export const dynamic = "force-dynamic";
+
 export async function POST(req) {
   try {
     const { name, phone, password, group_name } = await req.json();

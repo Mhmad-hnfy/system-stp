@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 
+export const dynamic = "force-dynamic";
+
 // GET — قائمة الحضور مع فلترة اختيارية
 // ?student_id=xxx  → حضور طالب معين
 // ?date=2026-09-01 → حضور يوم معين
