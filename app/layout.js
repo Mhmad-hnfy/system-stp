@@ -2,7 +2,7 @@ import "./globals.css";
 import { GlobalProvider } from "@/lib/store";
 
 export const metadata = {
-  title: "منصة الباشميكانيكي التعليمية | رياضيات وفيزياء",
+  title: " سيستم باشميكانيكي التعليمي | رياضيات وفيزياء",
   description: "نظام إدارة الحضور، الجداول، والدفعات للسنتر التعليمي",
   icons: {
     icon: "/logo.jpg",

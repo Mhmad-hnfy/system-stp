@@ -225,7 +225,7 @@ export default function Home() {
             WebkitBackgroundClip: "text",
             WebkitTextFillColor: "transparent"
           }}>
-            منصة "الباشميكانيكي" التعليمية
+           سيستم "الباشميكانيكي"
           </h2>
 
           <p style={{ 
@@ -364,7 +364,10 @@ export default function Home() {
         background: "rgba(10, 15, 29, 0.9)",
         zIndex: 10
       }}>
-        <p>جميع الحقوق محفوظة © {new Date().getFullYear()} — منصة سنتر الباشميكانيكي للرياضيات والفيزياء ⚙️</p>
+        <p>جميع الحقوق محفوظة © {new Date().getFullYear()} — سيستم الباشميكانيكي⚙️ 
+          <br />
+          Code By ENG Mohamed Hanafy 
+        </p>
       </footer>
     </main>
   );
